@@ -1,0 +1,1 @@
+k8s storageclass 基于nfs生成的存储类
