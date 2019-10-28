@@ -1,0 +1,62 @@
+// 公共
+def registry = "10.10.10.90"
+// 项目
+def project = "welcome" //项目名字，比如wetax
+def app_name = "demo"  //项目下的子服务，比如payment支付服务
+def image_name = "${registry}/${project}/${app_name}:${BUILD_NUMBER}" //定义镜像名称,project就是harbor上面的项目名,${BUILD_NUMBER}为jenkins内置变量，为构建号
+def git_address = "git@10.10.10.90:/home/git/java-demo.git" //定义git仓库地址
+// 认证
+def secret_name = "registry-pull-secret" //名字为通过kubectl create secret创建出来的
+def docker_registry_auth = "a15b4744-4e9d-4d05-88ca-f9dc01cc03a0"
+def git_auth = "a925555c-deaa-4e72-abc9-770a82d03fe4"
+def k8s_auth = "584035b7-fb4f-4be7-9fce-25d67829e494"
+
+podTemplate(label: 'jenkins-slave', cloud: 'kubernetes', containers: [
+    containerTemplate(
+        name: 'jnlp', 
+        image: "${registry}/library/jenkins-slave-jdk:1.8"
+    ),
+  ],
+  volumes: [
+    hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock'),
+    hostPathVolume(mountPath: '/usr/bin/docker', hostPath: '/usr/bin/docker')
+  ],
+) 
+{
+  node("jenkins-slave"){
+      // 第一步
+      stage('拉取代码'){
+         checkout([$class: 'GitSCM', branches: [[name: '${Branch}']], userRemoteConfigs: [[credentialsId: "${git_auth}", url: "${git_address}"]]])
+      }
+      // 第二步
+      stage('代码编译'){
+          sh "mvn clean package -Dmaven.test.skip=true"
+      }
+      // 第三步
+      stage('构建镜像'){
+          //这一段是保存访问镜像仓库的用户名和密码
+          withCredentials([usernamePassword(credentialsId: "${docker_registry_auth}", passwordVariable: 'password', usernameVariable: 'username')]) {
+            sh """
+              echo '
+                FROM 10.10.10.90/library/tomcat:v1 
+                RUN rm -rf /usr/local/tomcat/webapps/*
+                ADD target/*.war /usr/local/tomcat/webapps/ROOT.war 
+              ' > Dockerfile
+              ls 
+              ls target
+              docker build -t ${image_name} .
+              docker login -u ${username} -p '${password}' ${registry}
+              docker push ${image_name}
+            """
+            }
+      }
+      // 第四步
+      stage('部署到K8S平台'){
+          sh """
+          sed -i 's#\$IMAGE_NAME#${image_name}#' deploy.yml
+          sed -i 's#\$SECRET_NAME#${secret_name}#' deploy.yml
+          """
+          kubernetesDeploy configs: 'deploy.yml', kubeconfigId: "${k8s_auth}"
+      }
+  }
+}
